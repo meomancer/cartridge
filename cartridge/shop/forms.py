@@ -1,4 +1,3 @@
-
 from __future__ import absolute_import, unicode_literals
 from future.builtins import filter, int, range, str, super, zip
 from future.utils import with_metaclass
@@ -26,12 +25,43 @@ from cartridge.shop.models import Cart, CartItem, Order, DiscountCode
 from cartridge.shop.utils import (make_choices, set_locale, set_shipping,
                                   clear_session)
 
+from cartridge.shop import validate
 
 ADD_PRODUCT_ERRORS = {
     "invalid_options": _("The selected options are currently unavailable."),
     "no_stock": _("The selected options are currently not in stock."),
     "no_stock_quantity": _("The selected quantity is currently unavailable."),
 }
+from django import forms
+
+
+class VATField(forms.CharField):
+    """
+    >>> f = VATField(external_validation=True)
+    >>> f.clean("SE556056625801")
+    'SE556056625801'
+    """
+
+    def __init__(self, external_validation=False, *args, **kwargs):
+        self.external_validation = external_validation
+        kwargs['min_length'] = 3
+        super(VATField, self).__init__(*args, **kwargs)
+
+    def clean(self, value):
+        if not value:
+            return value
+
+        try:
+            is_valid, vat_number = validate.validate(
+                value,
+                self.external_validation)
+        except validate.CommunicationError:
+            raise forms.ValidationError(u"Unable to contact VAT validation "
+                                        u"service.")
+        if not is_valid:
+            raise forms.ValidationError(u"Not a valid VAT number.")
+
+        return vat_number
 
 
 class AddProductForm(forms.Form):
@@ -75,7 +105,7 @@ class AddProductForm(forms.Form):
         if not option_fields:
             return
         option_names, option_labels = list(zip(*[(f.name, f.verbose_name)
-            for f in option_fields]))
+                                                 for f in option_fields]))
         option_values = list(zip(*self._product.variations.filter(
             unit_price__isnull=False).values_list(*option_names)))
         if option_values:
@@ -148,6 +178,7 @@ class CartItemForm(forms.ModelForm):
             raise forms.ValidationError("%s: %s" % (error, quantity))
         return quantity
 
+
 CartItemFormSet = inlineformset_factory(Cart, CartItem, form=CartItemForm,
                                         can_delete=True, extra=0)
 
@@ -216,18 +247,18 @@ class FormsetForm(object):
             return None
         filters = (
             ("^other_fields$", lambda:
-                self.fields.keys()),
+            self.fields.keys()),
             ("^hidden_fields$", lambda:
-                [n for n, f in self.fields.items()
-                 if isinstance(f.widget, forms.HiddenInput)]),
+            [n for n, f in self.fields.items()
+             if isinstance(f.widget, forms.HiddenInput)]),
             ("^(\w*)_fields$", lambda name:
-                [f for f in self.fields.keys() if f.startswith(name)]),
+            [f for f in self.fields.keys() if f.startswith(name)]),
             ("^(\w*)_field$", lambda name:
-                [f for f in self.fields.keys() if f == name]),
+            [f for f in self.fields.keys() if f == name]),
             ("^fields_before_(\w*)$", lambda name:
-                takewhile(lambda f: f != name, self.fields.keys())),
+            takewhile(lambda f: f != name, self.fields.keys())),
             ("^fields_after_(\w*)$", lambda name:
-                dropwhile(lambda f: f != name, self.fields.keys())[1:]),
+            dropwhile(lambda f: f != name, self.fields.keys())[1:]),
         )
         for filter_exp, filter_func in filters:
             filter_args = match(filter_exp, name)
@@ -237,7 +268,6 @@ class FormsetForm(object):
 
 
 class DiscountForm(forms.ModelForm):
-
     class Meta:
         model = Order
         fields = ("discount_code",)
@@ -248,7 +278,7 @@ class DiscountForm(forms.ModelForm):
         which is required to validate the discount code when entered.
         """
         super(DiscountForm, self).__init__(
-                data=data, initial=initial, **kwargs)
+            data=data, initial=initial, **kwargs)
         self._request = request
 
     def clean_discount_code(self):
@@ -302,27 +332,28 @@ class OrderForm(FormsetForm, DiscountForm):
 
     step = forms.IntegerField(widget=forms.HiddenInput())
     same_billing_shipping = forms.BooleanField(required=False, initial=True,
-        label=_("My delivery details are the same as my billing details"))
+                                               label=_("My delivery details are the same as my billing details"))
     remember = forms.BooleanField(required=False, initial=True,
-        label=_("Remember my address for next time"))
+                                  label=_("Remember my address for next time"))
     card_name = forms.CharField(label=_("Cardholder name"))
     card_type = forms.ChoiceField(label=_("Card type"),
-        widget=forms.RadioSelect,
-        choices=make_choices(settings.SHOP_CARD_TYPES))
+                                  widget=forms.RadioSelect,
+                                  choices=make_choices(settings.SHOP_CARD_TYPES))
     card_number = forms.CharField(label=_("Card number"))
     card_expiry_month = forms.ChoiceField(label=_("Card expiry month"),
-        initial="%02d" % date.today().month,
-        choices=make_choices(["%02d" % i for i in range(1, 13)]))
+                                          initial="%02d" % date.today().month,
+                                          choices=make_choices(["%02d" % i for i in range(1, 13)]))
     card_expiry_year = forms.ChoiceField(label=_("Card expiry year"))
     card_ccv = forms.CharField(label=_("CCV"), help_text=_("A security code, "
-        "usually the last 3 digits found on the back of your card."))
+                                                           "usually the last 3 digits found on the back of your card."))
+    billing_detail_vat_number = VATField(label=_("VAT No. "))
 
     class Meta:
         model = Order
         fields = ([f.name for f in Order._meta.fields if
                    f.name.startswith("billing_detail") or
                    f.name.startswith("shipping_detail")] +
-                   ["additional_instructions", "discount_code"])
+                  ["additional_instructions", "discount_code"])
 
     def __init__(
             self, request, step, data=None, initial=None, errors=None,
@@ -352,14 +383,14 @@ class OrderForm(FormsetForm, DiscountForm):
             initial["step"] = step
 
         super(OrderForm, self).__init__(
-                request, data=data, initial=initial, **kwargs)
+            request, data=data, initial=initial, **kwargs)
         self._checkout_errors = errors
 
         # Hide discount code field if it shouldn't appear in checkout,
         # or if no discount codes are active.
         settings.use_editable()
         if not (settings.SHOP_DISCOUNT_FIELD_IN_CHECKOUT and
-                DiscountCode.objects.active().exists()):
+                    DiscountCode.objects.active().exists()):
             self.fields["discount_code"].widget = forms.HiddenInput()
 
         # Determine which sets of fields to hide for each checkout step.
@@ -390,6 +421,10 @@ class OrderForm(FormsetForm, DiscountForm):
         year = now().year
         choices = make_choices(list(range(year, year + 21)))
         self.fields["card_expiry_year"].choices = choices
+        
+        if not request.session["tax_type"] and request.session["tax_type"].lower() != 'vat':
+            self.fields.pop('billing_detail_company')
+            self.fields.pop('billing_detail_vat_number')
 
     @classmethod
     def preprocess(cls, data):
@@ -438,6 +473,7 @@ class ImageWidget(forms.FileInput):
     """
     Render a visible thumbnail for image fields.
     """
+
     def render(self, name, value, attrs):
         rendered = super(ImageWidget, self).render(name, value, attrs)
         if value:
@@ -453,6 +489,7 @@ class MoneyWidget(forms.TextInput):
     """
     Render missing decimal places for money fields.
     """
+
     def render(self, name, value, attrs):
         try:
             value = float(value)
@@ -471,10 +508,11 @@ class ProductAdminFormMetaclass(ModelFormMetaclass):
     of the types of product options as sets of checkboxes for selecting
     which options to use when creating new product variations.
     """
+
     def __new__(cls, name, bases, attrs):
         for option in settings.SHOP_OPTION_TYPE_CHOICES:
             field = forms.MultipleChoiceField(label=option[1],
-                required=False, widget=forms.CheckboxSelectMultiple)
+                                              required=False, widget=forms.CheckboxSelectMultiple)
             attrs["option%s" % option[0]] = field
         args = (cls, name, bases, attrs)
         return super(ProductAdminFormMetaclass, cls).__new__(*args)
@@ -513,6 +551,7 @@ class ProductVariationAdminForm(forms.ModelForm):
     Ensure the list of images for the variation are specific to the
     variation's product.
     """
+
     def __init__(self, *args, **kwargs):
         super(ProductVariationAdminForm, self).__init__(*args, **kwargs)
         if "instance" in kwargs:
@@ -525,10 +564,11 @@ class ProductVariationAdminFormset(BaseInlineFormSet):
     """
     Ensure no more than one variation is checked as default.
     """
+
     def clean(self):
         super(ProductVariationAdminFormset, self).clean()
         if len([f for f in self.forms if hasattr(f, "cleaned_data") and
-            f.cleaned_data.get("default", False)]) > 1:
+                f.cleaned_data.get("default", False)]) > 1:
             error = _("Only one variation can be checked as the default.")
             raise forms.ValidationError(error)
 
@@ -538,6 +578,7 @@ class DiscountAdminForm(forms.ModelForm):
     Ensure only one discount field is given a value and if not, assign
     the error to the first discount field so that it displays correctly.
     """
+
     def clean(self):
         fields = [f for f in self.fields if f.startswith("discount_")]
         reductions = [self.cleaned_data.get(f) for f in fields
